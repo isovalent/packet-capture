@@ -27,7 +27,8 @@ spec:
         - /manager
         args:
         - --leader-elect
-        image: packet-capture-operator:latest
+        image: ghcr.io/isovalent/packet-capture-operator:latest
+        imagePullPolicy: IfNotPresent
         name: manager
         securityContext:
           allowPrivilegeEscalation: false

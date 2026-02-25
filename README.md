@@ -70,9 +70,13 @@ make build
 # Binary is output to: bin/manager
 
 # 4. Build the container image
-podman build --platform=linux/arm64 -t localhost/packet-capture-operator:latest .
+podman build --platform=linux/arm64 -t ghcr.io/isovalent/packet-capture-operator:latest .
 # For amd64:
-# podman build --platform=linux/amd64 -t localhost/packet-capture-operator:latest .
+# podman build --platform=linux/amd64 -t ghcr.io/isovalent/packet-capture-operator:latest .
+
+# 5. (Optional) Push to GHCR
+# echo $GITHUB_TOKEN | podman login ghcr.io -u <your-github-user> --password-stdin
+# podman push ghcr.io/isovalent/packet-capture-operator:latest
 ```
 
 ---
@@ -91,7 +95,7 @@ export KUBECONFIG=$(kind get kubeconfig-path --name demo 2>/dev/null || echo ~/.
 ### Step 2 — Load the operator image into kind nodes
 
 ```bash
-podman save localhost/packet-capture-operator:latest -o /tmp/pco.tar
+podman save ghcr.io/isovalent/packet-capture-operator:latest -o /tmp/pco.tar
 
 for node in $(kind get nodes --name demo); do
   podman cp /tmp/pco.tar $node:/tmp/pco.tar
