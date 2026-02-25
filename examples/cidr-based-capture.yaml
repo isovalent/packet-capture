@@ -1,0 +1,32 @@
+apiVersion: capture.k8s.io/v1alpha1
+kind: PacketCapture
+metadata:
+  name: cidr-capture
+  namespace: default
+spec:
+  # Capture traffic from specific CIDR ranges
+  source:
+    cidr:
+    - "10.0.0.0/8"
+    - "192.168.1.0/24"
+  
+  # To external destinations
+  destination:
+    cidr:
+    - "0.0.0.0/0"
+    ports:
+    - port: 443
+      protocol: TCP
+    - port: 80
+      protocol: TCP
+  
+  # Capture for 2 minutes
+  duration: "2m"
+  
+  # Custom BPF filter (overrides source/destination)
+  filter: "tcp port 443 or tcp port 80"
+  
+  interface: "eth0"
+  
+  # Limit packets
+  maxPackets: 50000

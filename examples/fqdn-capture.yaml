@@ -1,0 +1,25 @@
+apiVersion: capture.k8s.io/v1alpha1
+kind: PacketCapture
+metadata:
+  name: fqdn-capture
+  namespace: default
+spec:
+  # Capture traffic to specific FQDNs
+  destination:
+    fqdn:
+    - "api.example.com"
+    - "*.google.com"
+    ports:
+    - port: 443
+      protocol: TCP
+  
+  # Capture for 30 minutes
+  duration: "30m"
+  
+  interface: "any"
+  
+  # Storage configuration
+  storage:
+    type: PersistentVolume
+    persistentVolumeClaim: "packet-capture-pvc"
+    retentionDays: 7

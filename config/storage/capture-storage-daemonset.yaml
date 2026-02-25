@@ -1,0 +1,39 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: packet-capture-storage
+  namespace: packet-capture-system
+spec:
+  selector:
+    matchLabels:
+      app: packet-capture-storage
+  template:
+    metadata:
+      labels:
+        app: packet-capture-storage
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: storage-init
+        image: alpine:latest
+        command:
+        - sh
+        - -c
+        - |
+          mkdir -p /host/var/lib/packet-captures
+          chmod 777 /host/var/lib/packet-captures
+          echo "Packet capture storage initialized"
+          # Keep container running
+          tail -f /dev/null
+        volumeMounts:
+        - name: host-root
+          mountPath: /host
+        securityContext:
+          privileged: true
+      volumes:
+      - name: host-root
+        hostPath:
+          path: /
+          type: Directory

@@ -1,0 +1,33 @@
+apiVersion: capture.k8s.io/v1alpha1
+kind: PacketCapture
+metadata:
+  name: pod-to-pod-capture
+  namespace: default
+spec:
+  # Capture traffic from pods with app=frontend label
+  source:
+    podSelector:
+      matchLabels:
+        class: netshoot
+  
+  # To pods with app=backend label
+  destination:
+    podSelector:
+      matchLabels:
+        app: proxy
+    ports:
+    - port: 80
+      protocol: TCP
+  
+  # Capture for 1 minute
+  duration: "1m"
+  
+  # Capture on worker nodes only
+  # nodeSelector:
+  #   node-role.kubernetes.io/worker: ""
+  
+  interface: "any"
+
+  storage:
+    type: "PersistentVolume"
+    persistentVolumeClaim: "packet-capture-pvc"

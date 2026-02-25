@@ -1,0 +1,29 @@
+# Podman-specific Makefile for multi-arch builds
+IMG ?= packet-capture-operator:latest
+PLATFORMS ?= linux/amd64,linux/arm64
+
+.PHONY: podman-build-multiarch
+podman-build-multiarch: ## Build multi-arch image with Podman
+	podman build --platform=$(PLATFORMS) \
+		--manifest $(IMG) \
+		-f Dockerfile .
+
+.PHONY: podman-build
+podman-build: ## Build single-arch image with Podman
+	podman build -t $(IMG) -f Dockerfile .
+
+.PHONY: podman-push
+podman-push: ## Push multi-arch manifest
+	podman manifest push $(IMG) docker://$(IMG)
+
+.PHONY: podman-save
+podman-save: ## Save image to tar for kind
+	podman save -o packet-capture-operator.tar $(IMG)
+
+.PHONY: kind-load
+kind-load: ## Load image into kind cluster
+	kind load image-archive packet-capture-operator.tar --name kind
+
+.PHONY: kind-load-direct
+kind-load-direct: ## Load image directly into kind (alternative method)
+	podman save $(IMG) | kind load image-archive /dev/stdin --name kind

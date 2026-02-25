@@ -1,0 +1,20 @@
+apiVersion: capture.k8s.io/v1alpha1
+kind: PacketCapture
+metadata:
+  name: basic-capture
+  namespace: default
+spec:
+  # Capture for 1 minute
+  duration: "1m"
+  
+  # Capture on all nodes
+  nodeSelector: {}
+  
+  # Capture on any interface
+  interface: "any"
+  
+  # Limit to 10000 packets
+  maxPackets: 10000
+  
+  # Standard snapshot length
+  maxPacketSize: 65535

@@ -1,0 +1,25 @@
+apiVersion: capture.k8s.io/v1alpha1
+kind: PacketCapture
+metadata:
+  name: persistent-capture
+  namespace: default
+spec:
+  # Capture for 1 minute
+  duration: "1m"
+  
+  # Capture HTTP/HTTPS traffic
+  filter: "tcp port 443 or tcp port 80"
+  
+  interface: "eth0"
+  
+  # Limit packets
+  maxPackets: 10000
+  
+  # Configure persistent storage
+  storage:
+    type: "PersistentVolume"
+    persistentVolumeClaim: "packet-capture-pvc"
+    retentionDays: 7
+  
+  # Capture on all nodes
+  nodeSelector: {}
