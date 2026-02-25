@@ -28,7 +28,7 @@ coverage.out
 *~
 
 # Build artifacts
-manager
+/manager
 controller-gen
 kustomize
 
