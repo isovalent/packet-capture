@@ -307,6 +307,7 @@ echo "Packet capture completed"
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					NodeName:           targetPod.Spec.NodeName,
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: "packet-capture-job",
 					Containers: []corev1.Container{
