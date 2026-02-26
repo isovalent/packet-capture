@@ -38,3 +38,6 @@ vendor/
 # Local capture files
 captures/
 *.pcap
+
+# Local session notes
+SESSION_NOTES.md
