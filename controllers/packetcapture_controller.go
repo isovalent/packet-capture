@@ -29,7 +29,8 @@ const (
 // PacketCaptureReconciler reconciles a PacketCapture object
 type PacketCaptureReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme           *runtime.Scheme
+	OperatorNodeName string // node where the operator pod is running
 }
 
 // +kubebuilder:rbac:groups=capture.k8s.io,resources=packetcaptures,verbs=get;list;watch;create;update;patch;delete
@@ -266,7 +267,7 @@ func (r *PacketCaptureReconciler) handleRunning(ctx context.Context, capture *ca
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// completeCapture marks the capture as completed and cleans up Job pods
+// completeCapture marks the capture as completed, aggregates pcap files, and cleans up Job pods
 func (r *PacketCaptureReconciler) completeCapture(ctx context.Context, capture *capturev1alpha1.PacketCapture) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -279,6 +280,15 @@ func (r *PacketCaptureReconciler) completeCapture(ctx context.Context, capture *
 		return ctrl.Result{}, err
 	}
 
+	// Aggregate pcap files from worker nodes to operator node
+	if r.OperatorNodeName != "" {
+		logger.Info("Aggregating pcap files to operator node", "node", r.OperatorNodeName)
+		if err := r.aggregatePcapFiles(ctx, capture); err != nil {
+			logger.Error(err, "failed to aggregate pcap files")
+			// Don't fail the completion, just log the error
+		}
+	}
+
 	// Garbage collection: Delete completed Job pods
 	logger.Info("Starting garbage collection of completed Job pods")
 	if err := r.cleanupJobPods(ctx, capture); err != nil {
@@ -287,6 +297,146 @@ func (r *PacketCaptureReconciler) completeCapture(ctx context.Context, capture *
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// aggregatePcapFiles creates a Job on the operator's node that copies pcap files
+// from each worker node's hostPath into a central directory on the operator's node.
+func (r *PacketCaptureReconciler) aggregatePcapFiles(ctx context.Context, capture *capturev1alpha1.PacketCapture) error {
+	logger := log.FromContext(ctx)
+
+	// Collect unique nodes and their capture files
+	type nodeFile struct {
+		node string
+		file string
+	}
+	var targets []nodeFile
+	for _, job := range capture.Status.CaptureJobs {
+		if job.CaptureFile != "" && job.NodeName != "" && job.NodeName != r.OperatorNodeName {
+			targets = append(targets, nodeFile{node: job.NodeName, file: job.CaptureFile})
+		}
+	}
+
+	if len(targets) == 0 {
+		logger.Info("No remote pcap files to aggregate")
+		return nil
+	}
+
+	// Build shell script: for each worker node, find the preloader DaemonSet pod
+	// on that node and kubectl cp the pcap file to the operator node's hostPath
+	const (
+		preloaderLabel   = "app=packet-capture-image-preloader"
+		aggregateBasedir = "/var/lib/packet-captures"
+	)
+
+	var copyCommands string
+	var aggregatedFiles []string
+	for _, t := range targets {
+		filename := t.file[len("/var/lib/packet-captures/"):] // strip base dir
+		destPath := fmt.Sprintf("%s/%s", aggregateBasedir, filename)
+		aggregatedFiles = append(aggregatedFiles, destPath)
+		copyCommands += fmt.Sprintf(`
+echo "Copying %s from node %s..."
+PRELOADER_POD=$(kubectl get pods -n packet-capture-system -l %s \
+  --field-selector spec.nodeName=%s \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -z "$PRELOADER_POD" ]; then
+  echo "No preloader pod found on node %s, skipping"
+else
+  kubectl cp packet-capture-system/$PRELOADER_POD:/var/lib/packet-captures/%s %s/%s -c pause \
+    && echo "Copied %s successfully" \
+    || echo "Failed to copy %s"
+fi
+`,
+			filename, t.node, preloaderLabel, t.node,
+			t.node,
+			filename, aggregateBasedir, filename,
+			filename, filename)
+	}
+
+	script := fmt.Sprintf(`set -e
+echo "Starting pcap aggregation for capture %s..."
+%s
+echo "Aggregation complete. Files in %s:"
+ls -lh %s/ || true
+`, capture.Name, copyCommands, aggregateBasedir, aggregateBasedir)
+
+	hostPathType := corev1.HostPathDirectoryOrCreate
+	aggregatorJobName := fmt.Sprintf("pc-aggregate-%s", capture.Name)
+	true := true
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aggregatorJobName,
+			Namespace: capture.Namespace,
+			Labels: map[string]string{
+				"app":                         "packet-capture",
+				"capture.k8s.io/capture-name": capture.Name,
+				"capture.k8s.io/role":         "aggregator",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":                         "packet-capture",
+						"capture.k8s.io/capture-name": capture.Name,
+						"capture.k8s.io/role":         "aggregator",
+					},
+				},
+				Spec: corev1.PodSpec{
+					NodeName:           r.OperatorNodeName,
+					RestartPolicy:      corev1.RestartPolicyNever,
+					ServiceAccountName: "packet-capture-job",
+					Containers: []corev1.Container{
+						{
+							Name:            "aggregator",
+							Image:           "bitnami/kubectl:latest",
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"sh", "-c", script},
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &true,
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "captures",
+									MountPath: "/var/lib/packet-captures",
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "captures",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/var/lib/packet-captures",
+									Type: &hostPathType,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := ctrl.SetControllerReference(capture, job, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set owner reference on aggregator job: %w", err)
+	}
+
+	if err := r.Create(ctx, job); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create aggregator job: %w", err)
+	}
+
+	logger.Info("Created aggregator Job", "job", aggregatorJobName, "node", r.OperatorNodeName)
+
+	// Update status with aggregated file paths
+	capture.Status.CaptureFiles = append(capture.Status.CaptureFiles, aggregatedFiles...)
+	if err := r.Status().Update(ctx, capture); err != nil {
+		logger.Error(err, "failed to update CaptureFiles status")
+	}
+
+	return nil
 }
 
 // updateStatusFailed updates the status to Failed

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -59,9 +60,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	operatorNode := strings.TrimSpace(os.Getenv("NODE_NAME"))
+	if operatorNode != "" {
+		setupLog.Info("Operator running on node", "node", operatorNode)
+	} else {
+		setupLog.Info("NODE_NAME not set — pcap aggregation disabled")
+	}
+
 	if err = (&controllers.PacketCaptureReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		OperatorNodeName: operatorNode,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PacketCapture")
 		os.Exit(1)

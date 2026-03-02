@@ -30,6 +30,11 @@ spec:
         image: ghcr.io/isovalent/packet-capture-operator:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
