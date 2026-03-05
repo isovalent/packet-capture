@@ -12,6 +12,7 @@ A Kubernetes operator that enables declarative, cluster-wide packet capture usin
 - **Automatic garbage collection** — completed Job pods are deleted after capture finishes
 - **Image pre-loading** — a DaemonSet pre-pulls `nicolaka/netshoot:latest` on all nodes at startup to minimize cold-start delay
 - **Storage to host** — `.pcap` files written to `/var/lib/packet-captures/` on each node via HostPath volume
+- **Automatic aggregation** — all capture files from all nodes are copied to a central location on the operator's node for easy retrieval
 
 ## Architecture
 
@@ -205,24 +206,32 @@ kubectl logs -n default -l app=packet-capture
 
 After the capture completes, the controller automatically deletes the Job pods (garbage collection).
 
-### Step 8 — Retrieve and inspect the capture file
+### Step 8 — Retrieve and inspect the capture files
 
-The `.pcap` file is on the node that ran the capture pod:
+After capture completes, all `.pcap` files are automatically aggregated to a central location on the operator's node:
 
 ```bash
-# Find which node the capture ran on
-kubectl get pods -n default -l app=packet-capture -o wide
+# Check the capture status to see aggregated file paths
+kubectl get packetcapture pod-to-pod-capture -o jsonpath='{.status.captureFiles[*]}' | tr ' ' '\n'
+# Output:
+# /var/lib/packet-captures/aggregated/pod-to-pod-capture/kind-worker-pod-to-pod-capture-netshoot-source.pcap
+# /var/lib/packet-captures/aggregated/pod-to-pod-capture/kind-worker2-pod-to-pod-capture-proxy-destination.pcap
 
-# Copy the file from the node (kind uses podman/docker containers as nodes)
-node=$(kubectl get pods -n default -l app=packet-capture -o jsonpath='{.items[0].spec.nodeName}')
-podman cp $node:/var/lib/packet-captures/ ./captures/
+# Find which node the operator is running on
+operator_node=$(kubectl -n packet-capture-system get pods -l control-plane=controller-manager -o jsonpath='{.items[0].spec.nodeName}')
+echo "Operator node: $operator_node"
+
+# Copy all aggregated files from the operator's node
+podman cp $operator_node:/var/lib/packet-captures/aggregated/pod-to-pod-capture ./captures/
 
 # Inspect with tcpdump
-tcpdump -r captures/pod-to-pod-capture-netshoot-source.pcap -n -q | head -30
+tcpdump -r captures/kind-worker-pod-to-pod-capture-netshoot-source.pcap -n -q | head -30
 
 # Or open in Wireshark
-wireshark captures/pod-to-pod-capture-netshoot-source.pcap
+wireshark captures/*.pcap
 ```
+
+**Note:** Files are organized in `/var/lib/packet-captures/aggregated/<capture-name>/` with node names prefixed to avoid collisions.
 
 ### Step 9 — Clean up
 
@@ -280,6 +289,7 @@ kind delete cluster --name demo
 | `startTime` | `Time` | Capture start time |
 | `endTime` | `Time` | Capture end time |
 | `captureJobs` | `[]CaptureJobStatus` | Per-pod/node job status |
+| `captureFiles` | `[]string` | Aggregated capture file paths on operator's node |
 | `packetsCaptured` | `int64` | Total packets captured |
 | `message` | `string` | Human-readable status |
 

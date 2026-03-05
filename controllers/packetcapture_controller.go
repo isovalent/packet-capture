@@ -241,6 +241,10 @@ func (r *PacketCaptureReconciler) handleRunning(ctx context.Context, capture *ca
 
 		if job.Status.Succeeded > 0 {
 			jobStatus.Status = "Completed"
+			// Set capture file path if not already set
+			if jobStatus.CaptureFile == "" {
+				jobStatus.CaptureFile = fmt.Sprintf("/var/lib/packet-captures/%s-%s.pcap", capture.Name, job.CreationTimestamp.Format("20060102-150405"))
+			}
 		} else if job.Status.Failed > 0 {
 			jobStatus.Status = "Failed"
 		} else {
@@ -304,37 +308,56 @@ func (r *PacketCaptureReconciler) completeCapture(ctx context.Context, capture *
 func (r *PacketCaptureReconciler) aggregatePcapFiles(ctx context.Context, capture *capturev1alpha1.PacketCapture) error {
 	logger := log.FromContext(ctx)
 
-	// Collect unique nodes and their capture files
+	// Collect ALL capture files from all nodes (including operator's node)
 	type nodeFile struct {
 		node string
 		file string
 	}
 	var targets []nodeFile
 	for _, job := range capture.Status.CaptureJobs {
-		if job.CaptureFile != "" && job.NodeName != "" && job.NodeName != r.OperatorNodeName {
+		if job.CaptureFile != "" && job.NodeName != "" {
 			targets = append(targets, nodeFile{node: job.NodeName, file: job.CaptureFile})
 		}
 	}
 
 	if len(targets) == 0 {
-		logger.Info("No remote pcap files to aggregate")
+		logger.Info("No pcap files to aggregate")
 		return nil
 	}
 
-	// Build shell script: for each worker node, find the preloader DaemonSet pod
-	// on that node and kubectl cp the pcap file to the operator node's hostPath
+	// Build shell script: copy all files into aggregated/<capture-name>/ subdirectory
 	const (
 		preloaderLabel   = "app=packet-capture-image-preloader"
 		aggregateBasedir = "/var/lib/packet-captures"
 	)
 
+	aggregateDir := fmt.Sprintf("%s/aggregated/%s", aggregateBasedir, capture.Name)
 	var copyCommands string
 	var aggregatedFiles []string
+
+	// Create aggregated directory
+	copyCommands = fmt.Sprintf("mkdir -p %s\n", aggregateDir)
+
 	for _, t := range targets {
 		filename := t.file[len("/var/lib/packet-captures/"):] // strip base dir
-		destPath := fmt.Sprintf("%s/%s", aggregateBasedir, filename)
+		// Include node name in aggregated filename to avoid collisions
+		aggregatedFilename := fmt.Sprintf("%s-%s", t.node, filename)
+		destPath := fmt.Sprintf("%s/%s", aggregateDir, aggregatedFilename)
 		aggregatedFiles = append(aggregatedFiles, destPath)
-		copyCommands += fmt.Sprintf(`
+
+		if t.node == r.OperatorNodeName {
+			// Local file - just copy within the same filesystem
+			copyCommands += fmt.Sprintf(`
+echo "Copying local file %s..."
+cp %s/%s %s \
+  && echo "Copied %s successfully" \
+  || echo "Failed to copy %s"
+`,
+				filename, aggregateBasedir, filename, destPath,
+				filename, filename)
+		} else {
+			// Remote file - use kubectl exec cat to stream file (pause container lacks tar for kubectl cp)
+			copyCommands += fmt.Sprintf(`
 echo "Copying %s from node %s..."
 PRELOADER_POD=$(kubectl get pods -n packet-capture-system -l %s \
   --field-selector spec.nodeName=%s \
@@ -342,15 +365,16 @@ PRELOADER_POD=$(kubectl get pods -n packet-capture-system -l %s \
 if [ -z "$PRELOADER_POD" ]; then
   echo "No preloader pod found on node %s, skipping"
 else
-  kubectl cp packet-capture-system/$PRELOADER_POD:/var/lib/packet-captures/%s %s/%s -c pause \
-    && echo "Copied %s successfully" \
-    || echo "Failed to copy %s"
+  kubectl exec -n packet-capture-system $PRELOADER_POD -c busybox -- cat /var/lib/packet-captures/%s > %s 2>/dev/null \
+    && echo "Copied %s from %s successfully ($(stat -c %%s %s 2>/dev/null || stat -f %%z %s 2>/dev/null || echo '?') bytes)" \
+    || echo "Failed to copy %s from %s"
 fi
 `,
-			filename, t.node, preloaderLabel, t.node,
-			t.node,
-			filename, aggregateBasedir, filename,
-			filename, filename)
+				filename, t.node, preloaderLabel, t.node,
+				t.node,
+				filename, destPath,
+				filename, t.node, destPath, destPath, filename, t.node)
+		}
 	}
 
 	script := fmt.Sprintf(`set -e
@@ -358,7 +382,7 @@ echo "Starting pcap aggregation for capture %s..."
 %s
 echo "Aggregation complete. Files in %s:"
 ls -lh %s/ || true
-`, capture.Name, copyCommands, aggregateBasedir, aggregateBasedir)
+`, capture.Name, copyCommands, aggregateDir, aggregateDir)
 
 	hostPathType := corev1.HostPathDirectoryOrCreate
 	aggregatorJobName := fmt.Sprintf("pc-aggregate-%s", capture.Name)
@@ -709,12 +733,16 @@ func (r *PacketCaptureReconciler) buildVolumes(capture *capturev1alpha1.PacketCa
 		}
 	}
 
-	// Default to emptyDir
+	// Default to hostPath so files persist on node for aggregation
+	hostPathType := corev1.HostPathDirectoryOrCreate
 	return []corev1.Volume{
 		{
 			Name: "capture-output",
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/var/lib/packet-captures",
+					Type: &hostPathType,
+				},
 			},
 		},
 	}
@@ -771,8 +799,9 @@ func preloadImagesRunnable(c client.Client) manager.RunnableFunc {
 						},
 						Containers: []corev1.Container{
 							{
-								Name:  "pause",
-								Image: "gcr.io/google_containers/pause:3.1",
+								Name:    "busybox",
+								Image:   "busybox:latest",
+								Command: []string{"sh", "-c", "sleep infinity"},
 								VolumeMounts: []corev1.VolumeMount{
 									{Name: "captures", MountPath: "/var/lib/packet-captures"},
 								},
